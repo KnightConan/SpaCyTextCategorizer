@@ -10,21 +10,26 @@ class SpacyTextCategorizer:
 
     Example
     -------
-    sc = SpacyCategorizer('en_core_web_sm')
+    sc = SpacyTextCategorizer('en_core_web_sm')
     sc.fit(X_train, y_train)
     sc.predict(X_test)
     """
 
-    def __init__(self, language_model, batch_size=None, drop=0.2, tokenizer=None):
+    def __init__(self, language_model, batch_size=None, drop=0.2):
         self.nlp, self.text_cat = self._prepare(language_model)
         self.optimizer = None
         self.batch_size = batch_size or compounding(4., 32., 1.001)
         self.drop = drop
-        self.tokenizer = tokenizer or self.nlp.tokenizer
-        # optional
-        self.onehot_encoder = OneHotEncoder(sparse=False, categories='auto', dtype=int)
+        self.encoder = OneHotEncoder(sparse=False, categories='auto', dtype=int)
 
-    def _prepare(self, language_model):
+    @property
+    def classes_(self):
+        if not hasattr(self.encoder, "categories_"):
+            return list()
+        return next(iter(self.encoder.categories_)).tolist()
+
+    @staticmethod
+    def _prepare(language_model):
         """Prepare the language model and text categorizer.
 
         :param language_model:
@@ -52,18 +57,19 @@ class SpacyTextCategorizer:
         return nlp, text_cat
 
     def _transform(self, y):
-        temp_df = y.values.reshape(-1, 1)
-        onehot_encoded = self.onehot_encoder.fit_transform(temp_df)
-        labels = pd.DataFrame(onehot_encoded,
-                              columns=self.onehot_encoder.categories_[0])
+        tmp_array = pd.Series(y).values.reshape(-1, 1)
+        one_hot_encoded = self.encoder.fit_transform(tmp_array)
+        labels = pd.DataFrame(one_hot_encoded,
+                              columns=self.encoder.categories_[0])
         return list(labels.T.to_dict().values())
 
     def _inverse_transform(self, y):
-        return self.onehot_encoder.inverse_transform(y)
+        result = self.encoder.inverse_transform(y)
+        return np.array(result).flatten().tolist()
 
     def fit(self, X, y):
         y_train = self._transform(y)
-        labels = self.onehot_encoder.categories_[0]
+        labels = self.classes_
         for category in labels:
             self.text_cat.add_label(category)
         train_data = list(zip(X, [{'cats': cats} for cats in y_train]))
@@ -77,10 +83,15 @@ class SpacyTextCategorizer:
                             losses=losses)
         return self
 
-    def predict(self, X_test):
+    def predict_proba(self, X_test):
         self.text_cat.model.use_params(self.optimizer.averages)
-        docs = (self.tokenizer(text) for text in X_test)
-        cats_predicted = [doc.cats for doc in self.text_cat.pipe(docs)]
-        tmp = pd.DataFrame(cats_predicted, columns=cats_predicted[0].keys())
-        new_df = pd.DataFrame(np.where(tmp.T == tmp.T.max(), 1, 0), index=tmp.columns).T
-        return self._inverse_transform(new_df)
+        cats_predicted = [doc.cats for doc in self.text_cat.pipe(X_test)]
+        proba_df = pd.DataFrame(cats_predicted)
+        proba_df.columns = self._inverse_transform(proba_df.columns)
+        proba_df.columns = self.classes_
+        return proba_df.to_numpy()
+
+    def predict(self, X_test):
+        tmp = self.predict_proba(X_test).T
+        decision = np.where(tmp == tmp.max(), 1, 0).T
+        return self._inverse_transform(decision)
